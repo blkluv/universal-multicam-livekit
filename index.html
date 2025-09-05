@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="ar">
+<head>
+<meta charset="utf-8"/>
+<title>Universal Multi-Cam Player — Full (SFU)</title>
+
+<!-- players -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script src="https://player.vimeo.com/api/player.js"></script>
+
+<!-- LiveKit (نسخة محلية — تأكد من وجود الملف داخل /vendor) -->
+<script src="/vendor/livekit-client.umd.min.js"></script>
+
+<style>
+  :root{--bg:#05060a;--panel:#08101a;--muted:#2b3a4d;--accent:#60a5fa;--text:#e6eef6}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:Inter,Arial,Helvetica,sans-serif}
+  #playerContainer{position:relative;width:100vw;height:100vh;overflow:hidden}
+  #activeCam{position:absolute;inset:0;background:#000;z-index:1}
+  #mainPreview{position:absolute;top:12px;right:12px;width:min(26vw,420px);aspect-ratio:16/9;border-radius:10px;overflow:hidden;z-index:30;border:1px solid #ffffff10;background:#000}
+  .split #activeCam{left:50%;top:0;width:50%;height:100%}
+  .split #mainPreview{left:0;top:0;right:auto;width:50%;height:100%;border-radius:0}
+  #sideBar{position:absolute;top:12px;left:12px;width:160px;display:flex;flex-direction:column;gap:10px;z-index:40;max-height:calc(100vh - 24px);overflow:auto}
+  .thumb{width:160px;height:90px;border-radius:10px;overflow:hidden;background:#06111a;border:1px solid #ffffff0a;position:relative;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .thumb .label{position:absolute;left:6px;bottom:6px;background:#0008;padding:3px 6px;border-radius:6px;font-size:12px}
+  .thumb.active{outline:2px solid var(--accent)}
+  .thumb video,.thumb iframe{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:0}
+  #controls{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:60;display:flex;gap:8px;background:#0006;padding:8px;border-radius:10px;flex-wrap:wrap;justify-content:center}
+  button,select,input{background:var(--panel);color:var(--text);border:1px solid var(--muted);padding:8px;border-radius:8px;cursor:pointer}
+  button:hover,select:hover{border-color:#4b6b8a}
+  .danger{background:#ff3b30;border-color:transparent}
+  .small{padding:6px 8px;font-size:13px}
+  .fade-ui{opacity:0.12;transition:opacity .25s}
+  .fade-ui:hover,.ui-visible{opacity:1}
+</style>
+</head>
+<body>
+<div id="playerContainer" class="fade-ui ui-visible">
+  <div id="activeCam"></div>
+  <div id="mainPreview"></div>
+  <div id="sideBar"></div>
+
+  <div id="controls">
+    <button id="splitBtn" class="small">تقسيم الشاشة</button>
+    <label>مصدر الصوت:
+      <select id="audioSelect" class="small"></select>
+    </label>
+    <button id="addLocalBtn" class="small">+ إضافة كاميرا/مايك</button>
+
+    <!-- واجهة SFU (LiveKit) -->
+    <input id="roomId" class="small" placeholder="اسم الغرفة" style="width:140px"/>
+    <input id="displayName" class="small" placeholder="اسمك" style="width:140px"/>
+    <input id="lkUrl" class="small" placeholder="LiveKit URL (wss://...)" style="width:260px"/>
+    <button id="joinSFUBtn" class="small">انضم SFU</button>
+    <button id="leaveSFUBtn" class="small danger" disabled>مغادرة SFU</button>
+
+    <button id="recBtn" class="small">بدء تسجيل Main+مايك</button>
+    <button id="stopRecBtn" class="small danger" disabled>إيقاف التسجيل</button>
+    <button id="screenRecBtn" class="small">تسجيل الشاشة</button>
+    <button id="stopScreenRecBtn" class="small danger" disabled>إيقاف تسجيل الشاشة</button>
+  </div>
+</div>
+
+<script>
+/* ======== CONFIG (عدِّل المصادر هنا) ======== */
+const sources = {
+  main: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+  cam1: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+  cam2: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+  cam3: "https://player.vimeo.com/video/357274789",
+  cam4: "https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd",
+  cam5: "https://youtu.be/ysz5S6PUM-U"
+};
+/* ============================================= */
+
+const sideBar = document.getElementById('sideBar');
+const mainPreview = document.getElementById('mainPreview');
+const activeCamEl = document.getElementById('activeCam');
+const audioSelect = document.getElementById('audioSelect');
+const splitBtn = document.getElementById('splitBtn');
+const addLocalBtn = document.getElementById('addLocalBtn');
+const recBtn = document.getElementById('recBtn');
+const stopRecBtn = document.getElementById('stopRecBtn');
+const screenRecBtn = document.getElementById('screenRecBtn');
+const stopScreenRecBtn = document.getElementById('stopScreenRecBtn');
+
+/* ======== SFU UI ======== */
+const roomInput = document.getElementById('roomId');
+const nameInput = document.getElementById('displayName');
+const lkUrlInput = document.getElementById('lkUrl');
+const joinSFUBtn = document.getElementById('joinSFUBtn');
+const leaveSFUBtn = document.getElementById('leaveSFUBtn');
+
+let mainP = null, camP = null;
+let currentKey = 'cam1';
+let audioSource = 'main';
+let syncTimer = null;
+let lastSeekAt = 0;
+
+let recRecording=false, mediaRecorder=null, recordedChunks=[];
+let screenRecorder=null, screenChunks=[];
+
+let localCount = 0;
+
+/* ---------- utils ---------- */
+function clear(el){ el.innerHTML=''; }
+function detectType(src){
+  if(src instanceof MediaStream) return 'stream';
+  const s = String(src||'');
+  if(/youtube\.com|youtu\.be/.test(s)) return 'yt';
+  if(/vimeo\.com/.test(s)) return 'vimeo';
+  if(s.endsWith('.m3u8')) return 'hls';
+  if(s.endsWith('.mpd')) return 'dash';
+  return 'html';
+}
+
+/* ---------- create player ---------- */
+function createPlayer(container, src, unmuted=false){
+  clear(container);
+  const type = detectType(src);
+  const out = {type, api:null, url:src, ready:false};
+
+  if(type === 'yt'){
+    const holder = document.createElement('div'); container.appendChild(holder);
+    out.api = new YT.Player(holder, {
+      videoId: (String(src).split('v=')[1] || String(src).split('/').pop()).split('&')[0],
+      playerVars:{autoplay:1,controls:0,rel:0,playsinline:1},
+      events:{
+        onReady: e => { if(!unmuted) e.target.mute(); else e.target.unMute(); try{ e.target.playVideo(); }catch{} },
+        onStateChange: s => { if(s.data === YT.PlayerState.PLAYING) out.ready = true; }
+      }
+    });
+    return out;
+  }
+
+  if(type === 'vimeo'){
+    const iframe = document.createElement('iframe');
+    iframe.src = String(src).includes('player.vimeo.com') ? src : String(src).replace('vimeo.com/','player.vimeo.com/video/');
+    iframe.allow = "autoplay; fullscreen; picture-in-picture";
+    iframe.allowFullscreen = true;
+    iframe.style.width='100%'; iframe.style.height='100%';
+    container.appendChild(iframe);
+    out.api = new Vimeo.Player(iframe);
+    out.api.setVolume(unmuted?1:0);
+    out.api.play().catch(()=>{});
+    out.api.on('play', ()=> out.ready = true);
+    return out;
+  }
+
+  if(type === 'stream'){
+    const v = document.createElement('video');
+    v.autoplay=true; v.playsInline=true; v.muted = !unmuted; v.srcObject = src;
+    v.style.width='100%'; v.style.height='100%';
+    v.addEventListener('playing', ()=> out.ready = true);
+    container.appendChild(v); out.api = v; return out;
+  }
+
+  const v = document.createElement('video');
+  v.autoplay = true; v.playsInline = true; v.muted = !unmuted; v.controls = false;
+  v.style.width='100%'; v.style.height='100%'; container.appendChild(v);
+  if(type === 'hls' && Hls.isSupported()){
+    const hls = new Hls(); hls.loadSource(src); hls.attachMedia(v);
+  } else if(type === 'dash'){
+    dashjs.MediaPlayer().create().initialize(v, src, true);
+  } else {
+    v.src = src;
+  }
+  v.addEventListener('playing', ()=> out.ready = true);
+  v.play().catch(()=>{});
+  out.api = v;
+  return out;
+}
+
+/* ---------- time helpers ---------- */
+function setVolume(p, vol){
+  if(!p) return;
+  if(p.type === 'vimeo') p.api.setVolume(vol);
+  else if(p.type === 'yt'){ if(vol>0) p.api.unMute(); else p.api.mute(); }
+  else { try{ p.api.muted = (vol===0); p.api.volume = vol; }catch{} }
+}
+function getTime(p){
+  if(!p) return Promise.resolve(0);
+  if(p.type === 'vimeo') return p.api.getCurrentTime();
+  if(p.type === 'yt') return Promise.resolve(p.api.getCurrentTime ? p.api.getCurrentTime() : 0);
+  return Promise.resolve(p.api.currentTime || 0);
+}
+function seekTo(p, t){
+  if(!p) return;
+  if(p.type === 'vimeo'){ p.api.setCurrentTime(t).catch(()=>{}); }
+  else if(p.type === 'yt'){ if(p.api.seekTo) p.api.seekTo(t, true); }
+  else { try{ p.api.currentTime = t; }catch{} }
+}
+function ensurePlay(p){
+  if(!p) return;
+  if(p.type === 'vimeo') p.api.play().catch(()=>{});
+  else if(p.type === 'yt'){ if(p.api.playVideo) p.api.playVideo(); }
+  else { p.api.play && p.api.play().catch(()=>{}); }
+}
+
+/* ========== thumbnails & DnD ========== */
+function buildThumbnails(){
+  sideBar.innerHTML = '';
+  const keys = Object.keys(sources);
+  keys.forEach(key=>{
+    const t = document.createElement('div');
+    t.className = 'thumb';
+    t.dataset.key = key;
+    t.draggable = true;
+    const label = document.createElement('div'); label.className='label'; label.textContent = key.toUpperCase();
+    t.appendChild(label);
+
+    try { t._tiny = createPlayer(t, sources[key], false); } catch(e){}
+
+    t.onclick = ()=> activateCamera(key);
+    t.addEventListener('dragstart', ev=> { ev.dataTransfer.setData('text/plain', key); ev.dataTransfer.effectAllowed='move'; });
+    t.addEventListener('dragover', ev=> { ev.preventDefault(); t.style.outline='2px dashed #fff3'; });
+    t.addEventListener('dragleave', ()=> { t.style.outline=''; });
+    t.addEventListener('drop', ev=>{
+      ev.preventDefault(); t.style.outline='';
+      const from = ev.dataTransfer.getData('text/plain'); const to = t.dataset.key;
+      reorderSources(from, to);
+    });
+
+    sideBar.appendChild(t);
+  });
+
+  const add = document.createElement('div');
+  add.className='thumb'; add.style.display='flex'; add.style.alignItems='center'; add.style.justifyContent='center';
+  add.innerHTML = '<div style="font-size:28px;color:#9aa9bf">+</div>';
+  add.title = 'أضف كاميرا / مايك محلي';
+  add.onclick = addLocalCamera;
+  sideBar.appendChild(add);
+
+  updateThumbActive();
+}
+function orderKeysAfterReorder(fromKey, toKey){
+  const keys = Object.keys(sources);
+  const from = keys.indexOf(fromKey), to = keys.indexOf(toKey);
+  if(from<0||to<0) return;
+  keys.splice(to,0, keys.splice(from,1)[0]);
+  const newObj = {}; keys.forEach(k=> newObj[k]=sources[k]);
+  for(const k in sources) delete sources[k]; Object.assign(sources, newObj);
+  buildThumbnails(); buildAudioSelect();
+}
+function reorderSources(fromKey, toKey){ orderKeysAfterReorder(fromKey,toKey); }
+
+/* ========== activate camera ========== */
+async function activateCamera(key){
+  currentKey = key;
+  const unmuted = (audioSource === key);
+  camP = createPlayer(activeCamEl, sources[key], unmuted);
+  setVolume(mainP, audioSource === 'main' ? 1 : 0);
+  setVolume(camP, audioSource === key ? 1 : 0);
+  setTimeout(()=> hardSyncCamToMain(2), 700);
+  updateThumbActive();
+}
+function updateThumbActive(){
+  [...sideBar.querySelectorAll('.thumb')].forEach(t=> t.classList.toggle('active', t.dataset.key === currentKey));
+}
+
+/* ========== robust sync ========= */
+async function hardSyncCamToMain(maxDrift=2){
+  if(!mainP || !camP) return;
+  if(!mainP.ready || !camP.ready) return;
+  const mainT = await getTime(mainP); const camT = await getTime(camP);
+  if(mainT < 0.8) return;
+  const drift = Math.abs(mainT - camT), now = performance.now();
+  if(drift > maxDrift && (now - lastSeekAt) > 2000){
+    lastSeekAt = now; seekTo(camP, mainT + 0.12); setTimeout(()=> ensurePlay(camP), 150);
+  } else { ensurePlay(camP); ensurePlay(mainP); }
+}
+function startSyncLoop(){ if(syncTimer) clearInterval(syncTimer); syncTimer = setInterval(()=> hardSyncCamToMain(2), 700); }
+
+/* ========== audio select UI ========== */
+function buildAudioSelect(){
+  audioSelect.innerHTML = '';
+  Object.keys(sources).forEach(k=>{
+    const o = document.createElement('option'); o.value = k; o.textContent = k.toUpperCase(); audioSelect.appendChild(o);
+  });
+  audioSelect.value = audioSource;
+  audioSelect.onchange = ()=> {
+    audioSource = audioSelect.value;
+    setVolume(mainP, audioSource === 'main' ? 1 : 0);
+    if(camP) setVolume(camP, audioSource === currentKey ? 1 : 0);
+  };
+}
+
+/* ========== add local camera ========== */
+async function addLocalCamera(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+    localCount++; const key = 'local' + localCount;
+    sources[key] = stream; buildThumbnails(); buildAudioSelect(); activateCamera(key);
+    if (sfu.room) await sfuPublishLocal(stream);
+  }catch(e){ alert('فشل الوصول للكاميرا/المايك: ' + (e.message||e)); }
+}
+
+/* ========== recording Main + mic ========== */
+async function startRecordingMainWithMic(){
+  if(recRecording) return;
+  if(!mainP || !['html','hls','dash','stream'].includes(mainP.type)){
+    alert('التسجيل من Main متاح فقط إذا كان Main فيديو HTML5/HLS/DASH أو كاميرا محلية.'); return;
+  }
+  try{
+    const videoEl = mainP.api; const vStream = videoEl.captureStream ? videoEl.captureStream() : null;
+    if(!vStream){ alert('المتصفح لا يدعم captureStream لهذا المصدر.'); return; }
+    const mic = await navigator.mediaDevices.getUserMedia({audio:true});
+    const mixed = new MediaStream([...vStream.getVideoTracks(), ...mic.getAudioTracks()]);
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(mixed, {mimeType:'video/webm;codecs=vp9,opus'});
+    mediaRecorder.ondataavailable = e=>{ if(e.data && e.data.size) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = ()=>{
+      const blob = new Blob(recordedChunks,{type:'video/webm'});
+      const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='recorded_main.webm'; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+    };
+    mediaRecorder.start(); recRecording = true; recBtn.disabled = true; stopRecBtn.disabled = false;
+  }catch(e){ alert('خطأ عند بدء التسجيل: '+(e.message||e)); }
+}
+function stopRecordingMainWithMic(){ if(!recRecording) return; mediaRecorder.stop(); recRecording=false; recBtn.disabled=false; stopRecBtn.disabled=true; }
+
+/* ========== screen recording ========== */
+async function startScreenRecording(){
+  try{
+    const display = await navigator.mediaDevices.getDisplayMedia({video:true, audio:true});
+    let mic = null; try{ mic = await navigator.mediaDevices.getUserMedia({audio:true}); }catch(e){}
+    let mixed = display;
+    if(mic){ const tracks = [...display.getVideoTracks(), ...display.getAudioTracks(), ...mic.getAudioTracks()]; mixed = new MediaStream(tracks); }
+    screenChunks = [];
+    screenRecorder = new MediaRecorder(mixed, {mimeType:'video/webm;codecs=vp9,opus'});
+    screenRecorder.ondataavailable = e=>{ if(e.data && e.data.size) screenChunks.push(e.data); };
+    screenRecorder.onstop = ()=>{
+      const blob = new Blob(screenChunks,{type:'video/webm'});
+      const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='screen_recording.webm'; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+    };
+    screenRecorder.start(); screenRecBtn.disabled = true; stopScreenRecBtn.disabled = false;
+  }catch(e){ alert('تعذّر تسجيل الشاشة: ' + (e.message||e)); }
+}
+function stopScreenRecording(){ if(!screenRecorder) return; screenRecorder.stop(); screenRecBtn.disabled=false; stopScreenRecBtn.disabled=true; }
+
+/* ============== SFU (LiveKit) ============== */
+const MAX_PARTICIPANTS = 24;
+const sfu = { room: null, localPub:{video:null,audio:null}, remoteByParticipant:new Map() };
+
+function getLK(){
+  return window.LiveKit || window.livekit || window.Livekit || null;
+}
+
+async function sfuJoin(){
+  if (sfu.room){ alert('أنت متصل بالفعل بـ SFU'); return; }
+  const wsUrl = (lkUrlInput.value||'').trim();
+  const roomName = (roomInput.value||'default-room').trim();
+  const identity = (nameInput.value||('user-' + Math.random().toString(36).slice(2,8))).trim();
+
+  if (!wsUrl){ alert('أدخل LiveKit URL (يبدأ بـ wss:// ويكون صحيحًا، مثال: wss://xxx.livekit.cloud)'); return; }
+
+  const LK = getLK();
+  if (!LK){ alert('LiveKit client غير محمّلة. تأكد أن /vendor/livekit-client.umd.min.js موجودة وأن السطر داخل <head>.'); return; }
+
+  try{
+    // احصل على التوكِن من الـ backend
+    const resp = await fetch(`/api/token?room=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}&name=${encodeURIComponent(identity)}`, { cache:'no-store' });
+    if (!resp.ok){ throw new Error('Token endpoint error'); }
+    const token = await resp.text();
+
+    const room = new LK.Room({
+      adaptiveStream:true, dynacast:true,
+      publishDefaults:{ simulcast:true, videoSimulcastLayers:[LK.VideoPresets.h180, LK.VideoPresets.h360, LK.VideoPresets.h720] }
+    });
+
+    room
+      .on(LK.RoomEvent.ParticipantDisconnected, p => { sfuDetachParticipant(p.sid); })
+      .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => { sfuAttachRemoteTrack(participant.sid, track); })
+      .on(LK.RoomEvent.TrackUnsubscribed, (track, pub, participant) => { sfuDetachTrack(participant.sid, track); });
+
+    await room.connect(wsUrl, token);
+    sfu.room = room;
+
+    leaveSFUBtn.disabled = false; joinSFUBtn.disabled = true; lkUrlInput.disabled = true; roomInput.disabled = true; nameInput.disabled = true;
+
+    // نشر الستريم المحلي لو موجود
+    const localKey = 'local' + localCount;
+    if (sources[localKey] instanceof MediaStream){
+      await sfuPublishLocal(sources[localKey]);
+    }
+  }catch(e){
+    console.error(e);
+    alert('فشل الاتصال بـ LiveKit: ' + (e && e.message ? e.message : e));
+  }
+}
+
+async function sfuPublishLocal(stream){
+  if (!sfu.room) return;
+  const LK = getLK(); if (!LK) return;
+  const vTrack = stream.getVideoTracks()[0]; const aTrack = stream.getAudioTracks()[0];
+  if (vTrack){ const pub = await sfu.room.localParticipant.publishTrack(new LK.LocalVideoTrack(vTrack)); sfu.localPub.video = pub; }
+  if (aTrack){ const pub = await sfu.room.localParticipant.publishTrack(new LK.LocalAudioTrack(aTrack)); sfu.localPub.audio = pub; }
+}
+
+function sfuAttachRemoteTrack(partSid, livekitTrack){
+  const store = sfu.remoteByParticipant.get(partSid) || {};
+  if (livekitTrack.kind === 'video') store.videoTrack = livekitTrack;
+  else if (livekitTrack.kind === 'audio') store.audioTrack = livekitTrack;
+
+  const ms = store.stream || new MediaStream();
+  const addIf = (t)=>{ if (t && t.mediaStreamTrack && !ms.getTracks().includes(t.mediaStreamTrack)) ms.addTrack(t.mediaStreamTrack); };
+  addIf(store.videoTrack); addIf(store.audioTrack);
+  store.stream = ms;
+
+  if (!store.key){
+    const key = `sfu_${partSid}`; store.key = key; sources[key] = ms;
+    buildThumbnails(); buildAudioSelect(); if (!camP) activateCamera(key);
+  } else { if (currentKey === store.key) activateCamera(store.key); }
+
+  sfu.remoteByParticipant.set(partSid, store);
+}
+function sfuDetachTrack(partSid, livekitTrack){
+  const store = sfu.remoteByParticipant.get(partSid); if (!store) return;
+  try{ if (store.stream && livekitTrack?.mediaStreamTrack){ store.stream.removeTrack(livekitTrack.mediaStreamTrack); livekitTrack.mediaStreamTrack.stop?.(); } }catch{}
+}
+async function sfuLeave(){
+  if (!sfu.room) return;
+  try{
+    try{ sfu.localPub.video?.unpublish(); }catch{}; try{ sfu.localPub.audio?.unpublish(); }catch{};
+    sfu.localPub = { video:null, audio:null };
+    for (const [sid] of sfu.remoteByParticipant.entries()){ sfuDetachParticipant(sid); }
+    await sfu.room.disconnect();
+  }finally{
+    sfu.room = null; leaveSFUBtn.disabled = true; joinSFUBtn.disabled = false;
+    lkUrlInput.disabled = false; roomInput.disabled = false; nameInput.disabled = false;
+  }
+}
+function sfuDetachParticipant(partSid){
+  const store = sfu.remoteByParticipant.get(partSid); if (!store) return;
+  const key = store.key;
+  if (key && sources[key]){
+    try{ const ms = sources[key]; if (ms instanceof MediaStream) ms.getTracks().forEach(t=>t.stop?.()); }catch{}
+    delete sources[key]; buildThumbnails(); buildAudioSelect();
+    if (currentKey === key){ const first = Object.keys(sources).find(k => k !== 'main'); if (first) activateCamera(first); }
+  }
+  sfu.remoteByParticipant.delete(partSid);
+}
+
+/* ========== init UI ========== */
+function initPlayers(){
+  mainP = createPlayer(mainPreview, sources.main, audioSource === 'main');
+  camP = createPlayer(activeCamEl, sources[currentKey], audioSource === currentKey);
+  buildThumbnails(); buildAudioSelect(); startSyncLoop();
+
+  splitBtn.onclick = ()=> document.getElementById('playerContainer').classList.toggle('split');
+  addLocalBtn.onclick = addLocalCamera;
+  recBtn.onclick = startRecordingMainWithMic;
+  stopRecBtn.onclick = stopRecordingMainWithMic;
+  screenRecBtn.onclick = startScreenRecording;
+  stopScreenRecBtn.onclick = stopScreenRecording;
+  audioSelect.onchange = ()=> { audioSource = audioSelect.value; setVolume(mainP, audioSource==='main'?1:0); if(camP) setVolume(camP, audioSource===currentKey?1:0); };
+
+  joinSFUBtn.onclick = sfuJoin;
+  leaveSFUBtn.onclick = sfuLeave;
+
+  setTimeout(()=> document.getElementById('playerContainer').classList.remove('ui-visible'), 2000);
+}
+window.onYouTubeIframeAPIReady = initPlayers;
+setTimeout(()=>{ if(!window.YT) initPlayers(); }, 4000);
+</script>
+</body>
+</html>
