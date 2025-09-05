@@ -1,32 +1,35 @@
+<!doctype html>
+<html lang="ar">
 <head>
-  <meta charset="utf-8"/>
-  <title>Universal Multi-Cam Player — Full (SFU)</title>
+<meta charset="utf-8"/>
+<title>Universal Multi-Cam Player — Full (SFU)</title>
 
-  <!-- مكتبات المشغّل -->
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
-  <script src="https://www.youtube.com/iframe_api"></script>
-  <script src="https://player.vimeo.com/api/player.js"></script>
+<!-- مكتبات المشغّل -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script src="https://player.vimeo.com/api/player.js"></script>
 
-  <!-- LiveKit (محلي) -->
-  <script src="/vendor/livekit-client.umd.min.js"></script>
+<!-- LiveKit (نسخة محليّة داخل الريبو) -->
+<script src="/vendor/livekit-client.umd.min.js"></script>
 
-  <!-- Fallback تلقائي إلى CDNJS إذا لم تُحمّل النسخة المحلية -->
-  <script>
-    (function () {
-      var hasLK = !!(window.LiveKit || window.livekit || window.Livekit);
-      if (!hasLK) {
-        var s = document.createElement('script');
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/livekit-client/2.15.6/livekit-client.umd.min.js';
-        s.onload = function(){ console.log('LiveKit (CDNJS) loaded'); };
-        s.onerror = function(){ alert('تعذّر تحميل LiveKit client من المحلي وCDNJS'); };
-        document.head.appendChild(s);
-      }
-    })();
-  </script>
-</head>
+<script>
+  // التحقق السريع + Fallback (اختياري) لو النسخة المحليّة غير متاحة
+  (function(){
+    var hasLK = !!(window.LiveKit || window.livekit || window.Livekit);
+    if(!hasLK){
+      var s=document.createElement('script');
+      s.src='https://cdnjs.cloudflare.com/ajax/libs/livekit-client/2.15.6/livekit-client.umd.min.js';
+      s.onload=function(){ console.log('LiveKit (CDNJS) loaded'); };
+      s.onerror=function(){ alert('تعذّر تحميل LiveKit client من المحلي وCDNJS'); };
+      document.head.appendChild(s);
+    }
+  })();
 
-<head>
+  // مُلتقط آمن للمكتبة
+  function getLK(){ return window.LiveKit || window.livekit || window.Livekit || null; }
+</script>
+
 <style>
   :root{--bg:#05060a;--panel:#08101a;--muted:#2b3a4d;--accent:#60a5fa;--text:#e6eef6}
   html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:Inter,Arial,Helvetica,sans-serif}
@@ -358,23 +361,18 @@ function stopScreenRecording(){ if(!screenRecorder) return; screenRecorder.stop(
 const MAX_PARTICIPANTS = 24;
 const sfu = { room: null, localPub:{video:null,audio:null}, remoteByParticipant:new Map() };
 
-function getLK(){
-  return window.LiveKit || window.livekit || window.Livekit || null;
-}
-
 async function sfuJoin(){
   if (sfu.room){ alert('أنت متصل بالفعل بـ SFU'); return; }
   const wsUrl = (lkUrlInput.value||'').trim();
   const roomName = (roomInput.value||'default-room').trim();
   const identity = (nameInput.value||('user-' + Math.random().toString(36).slice(2,8))).trim();
-
-  if (!wsUrl){ alert('أدخل LiveKit URL (يبدأ بـ wss:// ويكون صحيحًا، مثال: wss://xxx.livekit.cloud)'); return; }
+  if (!wsUrl){ alert('أدخل LiveKit URL (wss://...)'); return; }
 
   const LK = getLK();
-  if (!LK){ alert('LiveKit client غير محمّلة. تأكد أن /vendor/livekit-client.umd.min.js موجودة وأن السطر داخل <head>.'); return; }
+  if (!LK){ alert('LiveKit client غير محمّلة. تأكد من /vendor/... داخل <head>.'); return; }
 
   try{
-    // احصل على التوكِن من الـ backend
+    // توكِن من الـ backend
     const resp = await fetch(`/api/token?room=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}&name=${encodeURIComponent(identity)}`, { cache:'no-store' });
     if (!resp.ok){ throw new Error('Token endpoint error'); }
     const token = await resp.text();
