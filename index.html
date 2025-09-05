@@ -1,18 +1,32 @@
-<!doctype html>
-<html lang="ar">
 <head>
-<meta charset="utf-8"/>
-<title>Universal Multi-Cam Player — Full (SFU)</title>
+  <meta charset="utf-8"/>
+  <title>Universal Multi-Cam Player — Full (SFU)</title>
 
-<!-- players -->
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-<script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
-<script src="https://www.youtube.com/iframe_api"></script>
-<script src="https://player.vimeo.com/api/player.js"></script>
+  <!-- مكتبات المشغّل -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="https://player.vimeo.com/api/player.js"></script>
 
-<!-- LiveKit (نسخة محلية — تأكد من وجود الملف داخل /vendor) -->
-<script src="/vendor/livekit-client.umd.min.js"></script>
+  <!-- LiveKit (محلي) -->
+  <script src="/vendor/livekit-client.umd.min.js"></script>
 
+  <!-- Fallback تلقائي إلى CDNJS إذا لم تُحمّل النسخة المحلية -->
+  <script>
+    (function () {
+      var hasLK = !!(window.LiveKit || window.livekit || window.Livekit);
+      if (!hasLK) {
+        var s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/livekit-client/2.15.6/livekit-client.umd.min.js';
+        s.onload = function(){ console.log('LiveKit (CDNJS) loaded'); };
+        s.onerror = function(){ alert('تعذّر تحميل LiveKit client من المحلي وCDNJS'); };
+        document.head.appendChild(s);
+      }
+    })();
+  </script>
+</head>
+
+<head>
 <style>
   :root{--bg:#05060a;--panel:#08101a;--muted:#2b3a4d;--accent:#60a5fa;--text:#e6eef6}
   html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:Inter,Arial,Helvetica,sans-serif}
