@@ -1,0 +1,8 @@
+{
+  "name": "universal-multicam-livekit",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "livekit-server-sdk": "^2.13.3"
+  }
+}
