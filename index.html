@@ -12,7 +12,39 @@
 
 <!-- LiveKit (نسخة محليّة داخل الريبو) -->
 <script src="/vendor/livekit-client.umd.min.js"></script>
+  
+  <script>
+  // جسر لتوحيد اسم المتغيّر العام القادم من UMD
+  (function () {
+    var g = window;
+    var lk =
+      g.LiveKit ||
+      g.livekit ||
+      g.Livekit ||
+      g.LivekitClient ||   // بعض النسخ تستخدم هذا الاسم
+      g.livekitClient ||
+      g.LiveKitClient;
 
+    // عيّن أسماء موحّدة ليستعملها باقي الكود
+    if (!g.LiveKit && lk) g.LiveKit = lk;
+    if (!g.livekit && lk) g.livekit = lk;
+  })();
+
+  // دالة الحصول على الكائن (تغطي كل الأسماء المحتملة)
+  function getLK() {
+    var g = window;
+    return (
+      g.LiveKit ||
+      g.livekit ||
+      g.Livekit ||
+      g.LivekitClient ||
+      g.livekitClient ||
+      g.LiveKitClient ||
+      null
+    );
+  }
+</script>
+  
 <script>
   // التحقق السريع + Fallback (اختياري) لو النسخة المحليّة غير متاحة
   (function(){
