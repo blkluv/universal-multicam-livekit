@@ -13,7 +13,7 @@
   <!-- LiveKit (نسخة محليّة داخل الريبو) -->
   <script src="/vendor/livekit-client.umd.min.js"></script>
 
-  <!-- جسر أسماء + fallback تلقائي إلى CDNJS إن لزم + دالة getLK() عالمية -->
+  <!-- جسر أسماء + fallback إلى CDNJS إن لزم + دالة getLK() عالمية -->
   <script>
     (function () {
       const g = window;
@@ -320,7 +320,7 @@
       audioSource = audioSelect.value;
       setVolume(mainP, audioSource === 'main' ? 1 : 0);
       if(camP) setVolume(camP, audioSource === currentKey ? 1 : 0);
-      // حدّث كتم الصوت لمسارات LiveKit
+      // كتم/إلغاء كتم صوت المشاركين من LiveKit حسب الاختيار
       for (const store of sfu.remoteByParticipant.values()){
         if (store._audioEl) store._audioEl.muted = (audioSource !== store.key);
       }
@@ -390,6 +390,31 @@
     keyToSid: new Map()              // 'sfu_<sid>' -> sid
   };
 
+  // ---- دوال توافق الإصدارات ----
+  // تُرجع كل publications سواء كانت p.tracks أو p.trackPublications
+  function pubsOfParticipant(p){
+    if (!p) return [];
+    if (p.tracks && typeof p.tracks.values === 'function') {
+      return Array.from(p.tracks.values());
+    }
+    if (p.trackPublications && typeof p.trackPublications.values === 'function') {
+      return Array.from(p.trackPublications.values());
+    }
+    return [];
+  }
+  // اشتراك متوافق مع v1/v2
+  async function ensureSubscribedCompat(room, pub){
+    try {
+      if (pub && typeof pub.setSubscribed === 'function') {
+        await pub.setSubscribed(true);
+        return;
+      }
+      if (room?.localParticipant && typeof room.localParticipant.setSubscribed === 'function') {
+        await room.localParticipant.setSubscribed(pub, true);
+      }
+    } catch(e) { /* ignore */ }
+  }
+
   async function sfuJoin(){
     if (sfu.room){ alert('أنت متصل بالفعل بـ SFU'); return; }
     const wsUrl    = (lkUrlInput.value||'').trim();
@@ -426,7 +451,14 @@
           sfuDetachTrack(participant.sid, track);
         })
         .on(LK.RoomEvent.TrackPublished, async (pub, participant) => {
-          try { await pub.setSubscribed(true); } catch {}
+          await ensureSubscribedCompat(room, pub);
+          if (pub.track) sfuAttachRemoteTrack(participant.sid, pub.track);
+        })
+        .on(LK.RoomEvent.ParticipantConnected, async (p) => {
+          for (const pub of pubsOfParticipant(p)) {
+            await ensureSubscribedCompat(room, pub);
+            if (pub.track) sfuAttachRemoteTrack(p.sid, pub.track);
+          }
         })
         .on(LK.RoomEvent.ParticipantDisconnected, p => {
           sfuDetachParticipant(p.sid);
@@ -435,12 +467,20 @@
       await room.connect(wsUrl, token);
       sfu.room = room;
 
-      // اشترك في المسارات المنشورة مسبقًا
-      for (const [,p] of room.remoteParticipants) {
-        for (const pub of Array.from(p.tracks.values())) {
-          try { await pub.setSubscribed(true); } catch {}
+      // اشترك في المسارات المنشورة قبل دخولك (بكل الإصدارات)
+      const handleExisting = async (p) => {
+        for (const pub of pubsOfParticipant(p)) {
+          await ensureSubscribedCompat(room, pub);
           if (pub.track) sfuAttachRemoteTrack(p.sid, pub.track);
         }
+      };
+      if (room.remoteParticipants && typeof room.remoteParticipants.forEach === 'function') {
+        room.remoteParticipants.forEach((p) => { handleExisting(p); });
+      } else if (room.participants && typeof room.participants.forEach === 'function') {
+        room.participants.forEach((p) => { handleExisting(p); });
+      } else {
+        const rp = room.remoteParticipants || {};
+        for (const k in rp) { handleExisting(rp[k]); }
       }
 
       leaveSFUBtn.disabled = false; joinSFUBtn.disabled = true;
@@ -466,28 +506,31 @@
     if (!sfu.room) return;
     const LK = getLK(); if (!LK) return;
     const vTrack = stream.getVideoTracks()[0]; const aTrack = stream.getAudioTracks()[0];
-    if (vTrack){ const pub = await sfu.room.localParticipant.publishTrack(new LK.LocalVideoTrack(vTrack)); sfu.localPub.video = pub; }
-    if (aTrack){ const pub = await sfu.room.localParticipant.publishTrack(new LK.LocalAudioTrack(aTrack)); sfu.localPub.audio = pub; }
+    if (vTrack){
+      try { sfu.localPub.video = await sfu.room.localParticipant.publishTrack(new LK.LocalVideoTrack(vTrack)); }
+      catch { sfu.localPub.video = await sfu.room.localParticipant.publishTrack(vTrack); }
+    }
+    if (aTrack){
+      try { sfu.localPub.audio = await sfu.room.localParticipant.publishTrack(new LK.LocalAudioTrack(aTrack)); }
+      catch { sfu.localPub.audio = await sfu.room.localParticipant.publishTrack(aTrack); }
+    }
   }
 
   function sfuAttachRemoteTrack(partSid, livekitTrack){
     let store = sfu.remoteByParticipant.get(partSid);
     if (!store) {
-      // حد أقصى للمشاركين
-      if (sfu.remoteByParticipant.size >= MAX_PARTICIPANTS) return;
+      if (sfu.remoteByParticipant.size >= MAX_PARTICIPANTS) return; // حد أقصى
       store = {};
     }
 
     if (livekitTrack.kind === 'video') store.videoTrack = livekitTrack;
     else if (livekitTrack.kind === 'audio') store.audioTrack = livekitTrack;
 
-    // أنشئ مفتاح المصادر لدينا
     if (!store.key){
       const key = `sfu_${partSid}`; store.key = key;
       sfu.keyToSid.set(key, partSid);
     }
 
-    // أنشئ/حدّث MediaStream (للتوافق مع createPlayer)
     const ms = store.stream || new MediaStream();
     const addIf = (t)=>{ if(t && t.mediaStreamTrack && !ms.getTracks().includes(t.mediaStreamTrack)){ ms.addTrack(t.mediaStreamTrack); } };
     addIf(store.videoTrack); addIf(store.audioTrack);
@@ -496,30 +539,26 @@
     sources[store.key] = ms;
     buildThumbnails(); buildAudioSelect();
 
-    // إرفاق مباشر إلى عناصر الواجهة (thumb + العرض النشط)
     setTimeout(()=> sfuAttachToUI(store), 0);
-
     sfu.remoteByParticipant.set(partSid, store);
   }
 
   function sfuAttachToUI(store){
-    // 1) المصغّر
+    // المصغّر
     const thumb = [...sideBar.querySelectorAll('.thumb')].find(t => t.dataset.key === store.key);
     const thumbVideo = thumb && thumb._tiny && thumb._tiny.api;
     if (thumbVideo && store.videoTrack) {
       try { store.videoTrack.attach(thumbVideo); } catch {}
       thumbVideo.muted = true; thumbVideo.playsInline = true;
     }
-
-    // 2) العرض النشط
+    // العرض النشط
     if (currentKey === store.key && camP && camP.api && store.videoTrack) {
       try { store.videoTrack.attach(camP.api); } catch {}
       camP.api.muted = (audioSource !== store.key);
       camP.api.playsInline = true; camP.api.autoplay = true;
       camP.api.play && camP.api.play().catch(()=>{});
     }
-
-    // 3) الصوت بعنصر مستقل
+    // الصوت
     if (store.audioTrack) {
       if (!store._audioEl) {
         const a = document.createElement('audio');
@@ -544,7 +583,7 @@
   async function sfuLeave(){
     if (!sfu.room) return;
     try{
-      try{ sfu.localPub.video?.unpublish(); }catch{}; try{ sfu.localPub.audio?.unpublish(); }catch{};
+      try{ sfu.localPub.video?.unpublish?.(); }catch{}; try{ sfu.localPub.audio?.unpublish?.(); }catch{};
       sfu.localPub = { video:null, audio:null };
       for (const [sid] of sfu.remoteByParticipant.entries()){ sfuDetachParticipant(sid); }
       await sfu.room.disconnect();
@@ -586,8 +625,12 @@
     stopRecBtn.onclick = stopRecordingMainWithMic;
     screenRecBtn.onclick = startScreenRecording;
     stopScreenRecBtn.onclick = stopScreenRecording;
-    audioSelect.onchange = ()=> { audioSource = audioSelect.value; setVolume(mainP, audioSource==='main'?1:0); if(camP) setVolume(camP, audioSource===currentKey?1:0);
-      for (const store of sfu.remoteByParticipant.values()){ if (store._audioEl) store._audioEl.muted = (audioSource !== store.key); } };
+    audioSelect.onchange = ()=> {
+      audioSource = audioSelect.value;
+      setVolume(mainP, audioSource==='main'?1:0);
+      if(camP) setVolume(camP, audioSource===currentKey?1:0);
+      for (const store of sfu.remoteByParticipant.values()){ if (store._audioEl) store._audioEl.muted = (audioSource !== store.key); }
+    };
 
     joinSFUBtn.onclick = sfuJoin;
     leaveSFUBtn.onclick = sfuLeave;
