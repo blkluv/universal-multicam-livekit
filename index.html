@@ -216,11 +216,14 @@
     return Promise.resolve(p.api.currentTime || 0);
   }
   function seekTo(p, t){
-    if(!p) return;
-    if(p.type === 'vimeo'){ p.api.setCurrentTime(t).catch(()=>{}); }
-    else if(p.type === 'yt'){ if(p.api.seekTo) p.api.seekTo(t, true); }
-    else { try{ p.api.currentTime = t; }catch{} }
-  }
+  if(!p) return;
+  // لا تحاول الـ seek لمسارات LiveKit/MediaStream
+  if (p.type === 'stream') return;
+
+  if(p.type === 'vimeo'){ p.api.setCurrentTime(t).catch(()=>{}); }
+  else if(p.type === 'yt'){ if(p.api.seekTo) p.api.seekTo(t, true); }
+  else { try{ p.api.currentTime = t; }catch{} }
+}
   function ensurePlay(p){
     if(!p) return;
     if(p.type === 'vimeo') p.api.play().catch(()=>{});
@@ -298,15 +301,26 @@
 
   /* ========== robust sync ========= */
   async function hardSyncCamToMain(maxDrift=2){
-    if(!mainP || !camP) return;
-    if(!mainP.ready || !camP.ready) return;
-    const mainT = await getTime(mainP); const camT = await getTime(camP);
-    if(mainT < 0.8) return;
-    const drift = Math.abs(mainT - camT), now = performance.now();
-    if(drift > maxDrift && (now - lastSeekAt) > 2000){
-      lastSeekAt = now; seekTo(camP, mainT + 0.12); setTimeout(()=> ensurePlay(camP), 150);
-    } else { ensurePlay(camP); ensurePlay(mainP); }
+  if(!mainP || !camP) return;
+  if(!mainP.ready || !camP.ready) return;
+
+  // لو العرض النشط قادم من LiveKit (MediaStream) لا نعمل مزامنة زمن
+  if (camP.type === 'stream') { ensurePlay(camP); ensurePlay(mainP); return; }
+
+  const mainT = await getTime(mainP);
+  const camT = await getTime(camP);
+  if(mainT < 0.8) return;
+
+  const drift = Math.abs(mainT - camT);
+  const now = performance.now();
+  if(drift > maxDrift && (now - lastSeekAt) > 2000){
+    lastSeekAt = now;
+    seekTo(camP, mainT + 0.12);
+    setTimeout(()=> ensurePlay(camP), 150);
+  } else {
+    ensurePlay(camP); ensurePlay(mainP);
   }
+}
   function startSyncLoop(){ if(syncTimer) clearInterval(syncTimer); syncTimer = setInterval(()=> hardSyncCamToMain(2), 700); }
 
   /* ========== audio select UI ========== */
