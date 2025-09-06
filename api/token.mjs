@@ -7,7 +7,7 @@ function b64url(input) {
 }
 
 export default async function handler(req, res) {
-  // CORS بسيط (اختياري)
+  // Simple CORS (optional)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -25,17 +25,17 @@ export default async function handler(req, res) {
     const userId = (identity || 'user-' + Math.random().toString(36).slice(2, 8)).toString();
     const displayName = (name || userId).toString();
 
-    // JWT header & payload (مطابق لمتطلبات LiveKit)
+    // JWT header & payload (compliant with LiveKit requirements)
     const now = Math.floor(Date.now() / 1000);
     const header = { alg: 'HS256', typ: 'JWT' };
     const payload = {
       iss: apiKey,          // API key
-      sub: userId,          // هوية المستخدم (identity)
-      name: displayName,    // اسم العرض
-      nbf: now - 10,        // يُسمح قبل 10 ثواني هامش
-      exp: now + 60 * 60,   // صالح لساعة
+      sub: userId,          // User identity
+      name: displayName,    // Display name
+      nbf: now - 10,        // Allow 10 seconds margin before
+      exp: now + 60 * 60,   // Valid for 1 hour
       video: {
-        room,               // الغرفة
+        room,               // Room
         roomJoin: true,
         canPublish: true,
         canSubscribe: true
@@ -50,7 +50,7 @@ export default async function handler(req, res) {
     const token = `${toSign}.${signature}`;
 
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.status(200).send(token); // نص JWT فقط
+    return res.status(200).send(token); // JWT text only
   } catch (e) {
     return res.status(500).json({ error: e?.message || String(e) });
   }
