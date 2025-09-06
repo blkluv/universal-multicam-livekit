@@ -395,67 +395,66 @@ function stopScreenRecording(){ if(!screenRecorder) return; screenRecorder.stop(
 
 /* ============== SFU (LiveKit) ============== */
 const MAX_PARTICIPANTS = 24;
-const sfu = { room: null, localPub:{video:null,audio:null}, remoteByParticipant:new Map() };
+const sfu = {
+  room: null,
+  localPub: { video: null, audio: null },
+  remoteByParticipant: new Map(),  // sid -> store
+  keyToSid: new Map()              // 'sfu_<sid>' -> sid
+};
 
 async function sfuJoin(){
   if (sfu.room){ alert('أنت متصل بالفعل بـ SFU'); return; }
 
-  const wsUrl   = (lkUrlInput.value||'').trim();
-  const roomName= (roomInput.value||'default-room').trim();
-  const identity= (nameInput.value||('user-' + Math.random().toString(36).slice(2,8))).trim();
+  const wsUrl    = (lkUrlInput.value||'').trim();
+  const roomName = (roomInput.value||'default-room').trim();
+  const identity = (nameInput.value||('user-' + Math.random().toString(36).slice(2,8))).trim();
   if (!/^wss:\/\//.test(wsUrl)){ alert('أدخل LiveKit URL صحيح يبدأ بـ wss://'); return; }
 
   const LK = getLK();
   if (!LK){ alert('LiveKit client غير محمّلة'); return; }
 
   try{
-    // 1) احصل على التوكِن
     const resp  = await fetch(`/api/token?room=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}&name=${encodeURIComponent(identity)}`, {cache:'no-store'});
     if (!resp.ok){ throw new Error('Token endpoint error'); }
     const token = await resp.text();
 
-    // 2) أنشئ الغرفة مع autoSubscribe
     const room = new LK.Room({
       adaptiveStream: true,
       dynacast: true,
-      autoSubscribe: true,     // مهم جدًا
+      autoSubscribe: true,
       publishDefaults: { simulcast:true, videoSimulcastLayers:[LK.VideoPresets.h180, LK.VideoPresets.h360, LK.VideoPresets.h720] }
     });
 
-    // 3) أحداث
     room
+      // عندما أَشترك في مسار: أرفق الفيديو/الصوت على عناصر فعلية + على واجهتنا
       .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => {
-        // شغّل مسار LiveKit صراحةً لبدء الإطارات
+        // شغّل المسار على عنصر مخفي لضمان البدء
         try {
-          const ghost = track.attach(); 
-          ghost.muted = true;            // حتى لا يُمنع التشغيل التلقائي
+          const ghost = track.attach();
+          ghost.muted = true; ghost.playsInline = true;
           ghost.style.position='absolute'; ghost.style.left='-10000px'; ghost.style.width='0'; ghost.style.height='0';
           document.body.appendChild(ghost);
         } catch {}
-
-        sfuAttachRemoteTrack(participant.sid, track);
+        sfuAttachRemoteTrack(participant.sid, track); // يدفعه لبلاطاتنا
       })
       .on(LK.RoomEvent.TrackUnsubscribed, (track, pub, participant) => {
         sfuDetachTrack(participant.sid, track);
       })
-      .on(LK.RoomEvent.TrackPublished, (pub, participant) => {
-        // تأكّد من الاشتراك لو حدث النشر بعد دخولك
-        try { room.localParticipant.setSubscribed(pub, true); } catch {}
+      // عندما يُنشر مسار بعد دخولك، تأكد من الاشتراك صراحةً
+      .on(LK.RoomEvent.TrackPublished, async (pub, participant) => {
+        try { await pub.setSubscribed(true); } catch {}
       })
       .on(LK.RoomEvent.ParticipantDisconnected, p => {
         sfuDetachParticipant(p.sid);
       });
 
-    // 4) اتصل
     await room.connect(wsUrl, token);
     sfu.room = room;
 
-    // 5) اشترك في أي مسارات منشورة مسبقًا (قبل دخولك)
+    // اشترك فورًا في أي مسارات منشورة سلفًا
     for (const [,p] of room.remoteParticipants) {
-      const pubs = (p.tracks && Array.from(p.tracks.values())) || [];
-      for (const pub of pubs) {
-        try { room.localParticipant.setSubscribed(pub, true); } catch {}
-        // لو المسار جاهز بالفعل، اربطه فورًا
+      for (const pub of Array.from(p.tracks.values())) {
+        try { await pub.setSubscribed(true); } catch {}
         if (pub.track) sfuAttachRemoteTrack(p.sid, pub.track);
       }
     }
@@ -464,10 +463,16 @@ async function sfuJoin(){
     leaveSFUBtn.disabled = false; joinSFUBtn.disabled = true;
     lkUrlInput.disabled = true; roomInput.disabled = true; nameInput.disabled = true;
 
-    // 6) انشر كاميرتك إن كانت مضافة (اضغط + إضافة كاميرا/مايك قبل/بعد الانضمام)
-    const localKey = 'local' + localCount;
-    if (sources[localKey] instanceof MediaStream){
-      await sfuPublishLocal(sources[localKey]);
+    // نشر تلقائي (اختياري) لو ما أضفت كاميرا يدويًا
+    if (!(sources['local'+localCount] instanceof MediaStream)) {
+      try {
+        const autostream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+        localCount++; const key = 'local'+localCount;
+        sources[key] = autostream; buildThumbnails(); buildAudioSelect();
+        await sfuPublishLocal(autostream);
+        // أجعل كاميرتك العرض النشط أول مرة
+        activateCamera(key);
+      } catch {}
     }
   }catch(e){
     console.error(e);
@@ -488,28 +493,60 @@ function sfuAttachRemoteTrack(partSid, livekitTrack){
   if (livekitTrack.kind === 'video') store.videoTrack = livekitTrack;
   else if (livekitTrack.kind === 'audio') store.audioTrack = livekitTrack;
 
-  // اجمع المسارات في MediaStream تُستخدم داخل المشغل
-  const ms = store.stream || new MediaStream();
-  const addIf = (t)=>{ 
-    if (t && t.mediaStreamTrack && !ms.getTracks().includes(t.mediaStreamTrack)) {
-      ms.addTrack(t.mediaStreamTrack);
-    }
-  };
-  addIf(store.videoTrack); 
-  addIf(store.audioTrack);
-  store.stream = ms;
-
+  // أنشئ مفتاح المصادر لدينا
   if (!store.key){
-    const key = `sfu_${partSid}`;
-    store.key = key; 
-    sources[key] = ms;
-    buildThumbnails(); buildAudioSelect();
-    if (!camP) activateCamera(key);
-  } else {
-    if (currentKey === store.key) activateCamera(store.key); // تحديث العرض النشط
+    const key = `sfu_${partSid}`; store.key = key;
+    sfu.keyToSid.set(key, partSid);
   }
 
+  // أنشئ/حدّث MediaStream (للاحتفاظ بتوافق createPlayer)
+  const ms = store.stream || new MediaStream();
+  const addIf = (t)=>{ if(t && t.mediaStreamTrack && !ms.getTracks().includes(t.mediaStreamTrack)){ ms.addTrack(t.mediaStreamTrack); } };
+  addIf(store.videoTrack); addIf(store.audioTrack);
+  store.stream = ms;
+
+  // ادفعها لمصادر الواجهة
+  sources[store.key] = ms;
+
+  // إعادة بناء البلاطات (يُنشئ عناصر <video>)
+  buildThumbnails(); buildAudioSelect();
+
+  // إرفاق مباشر إلى العناصر: المصغّر + العرض النشط
+  setTimeout(()=> sfuAttachToUI(store), 0);
+
   sfu.remoteByParticipant.set(partSid, store);
+}
+
+function sfuAttachToUI(store){
+  // 1) المصغّر (thumb)
+  const thumb = [...sideBar.querySelectorAll('.thumb')].find(t => t.dataset.key === store.key);
+  const thumbVideo = thumb && thumb._tiny && thumb._tiny.api;
+  if (thumbVideo && store.videoTrack) {
+    try { store.videoTrack.attach(thumbVideo); } catch {}
+    thumbVideo.muted = true; thumbVideo.playsInline = true;
+  }
+
+  // 2) العرض النشط
+  if (currentKey === store.key && camP && camP.api && store.videoTrack) {
+    try { store.videoTrack.attach(camP.api); } catch {}
+    camP.api.muted = (audioSource !== store.key);
+    camP.api.playsInline = true;
+    camP.api.autoplay = true;
+    camP.api.style.backgroundColor = '#000';
+    camP.api.play && camP.api.play().catch(()=>{});
+  }
+
+  // 3) الصوت (عنصر منفصل لمنع مشاكل autoplay)
+  if (store.audioTrack) {
+    if (!store._audioEl) {
+      const a = document.createElement('audio');
+      a.autoplay = true; a.playsInline = true; a.muted = (audioSource !== store.key);
+      document.body.appendChild(a);
+      store._audioEl = a;
+    }
+    try { store.audioTrack.attach(store._audioEl); } catch {}
+    store._audioEl.muted = (audioSource !== store.key);
+  }
 }
 
 function sfuDetachTrack(partSid, livekitTrack){
@@ -521,29 +558,27 @@ function sfuDetachTrack(partSid, livekitTrack){
   }catch{}
 }
 
-async function sfuLeave(){
-  if (!sfu.room) return;
-  try{
-    try{ sfu.localPub.video?.unpublish(); }catch{}; try{ sfu.localPub.audio?.unpublish(); }catch{};
-    sfu.localPub = { video:null, audio:null };
-    for (const [sid] of sfu.remoteByParticipant.entries()){ sfuDetachParticipant(sid); }
-    await sfu.room.disconnect();
-  }finally{
-    sfu.room = null; leaveSFUBtn.disabled = true; joinSFUBtn.disabled = false;
-    lkUrlInput.disabled = false; roomInput.disabled = false; nameInput.disabled = false;
-  }
-}
 function sfuDetachParticipant(partSid){
   const store = sfu.remoteByParticipant.get(partSid); if (!store) return;
   const key = store.key;
-  if (key && sources[key]){
-    try{ const ms = sources[key]; if (ms instanceof MediaStream) ms.getTracks().forEach(t=>t.stop?.()); }catch{}
-    delete sources[key]; buildThumbnails(); buildAudioSelect();
-    if (currentKey === key){ const first = Object.keys(sources).find(k => k !== 'main'); if (first) activateCamera(first); }
-  }
-  sfu.remoteByParticipant.delete(partSid);
-}
 
+  // أوقف الصوت/الفيديو
+  try { store._audioEl?.remove(); } catch {}
+  if (store.stream instanceof MediaStream) {
+    try { store.stream.getTracks().forEach(t=>t.stop?.()); } catch {}
+  }
+
+  // نظّف المصادر والـ UI
+  if (key && sources[key]) delete sources[key];
+  sfu.remoteByParticipant.delete(partSid);
+  if (key) sfu.keyToSid.delete(key);
+
+  buildThumbnails(); buildAudioSelect();
+  if (currentKey === key){
+    const first = Object.keys(sources).find(k => k !== 'main');
+    if (first) activateCamera(first);
+  }
+}
 /* ========== init UI ========== */
 function initPlayers(){
   mainP = createPlayer(mainPreview, sources.main, audioSource === 'main');
