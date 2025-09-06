@@ -31,19 +31,14 @@
   })();
 
   // دالة الحصول على الكائن (تغطي كل الأسماء المحتملة)
-  function getLK() {
-    var g = window;
-    return (
-      g.LiveKit ||
-      g.livekit ||
-      g.Livekit ||
-      g.LivekitClient ||
-      g.livekitClient ||
-      g.LiveKitClient ||
-      null
-    );
+  <script>
+  // موجودة في <head> – اتركها إن كانت عندك
+  function getLK(){ 
+    const g = window; 
+    return g.LiveKit || g.livekit || g.Livekit || g.LivekitClient || g.livekitClient || g.LiveKitClient || null; 
   }
 </script>
+
   
 <script>
   // التحقق السريع + Fallback (اختياري) لو النسخة المحليّة غير متاحة
@@ -395,36 +390,72 @@ const sfu = { room: null, localPub:{video:null,audio:null}, remoteByParticipant:
 
 async function sfuJoin(){
   if (sfu.room){ alert('أنت متصل بالفعل بـ SFU'); return; }
-  const wsUrl = (lkUrlInput.value||'').trim();
-  const roomName = (roomInput.value||'default-room').trim();
-  const identity = (nameInput.value||('user-' + Math.random().toString(36).slice(2,8))).trim();
-  if (!wsUrl){ alert('أدخل LiveKit URL (wss://...)'); return; }
+
+  const wsUrl   = (lkUrlInput.value||'').trim();
+  const roomName= (roomInput.value||'default-room').trim();
+  const identity= (nameInput.value||('user-' + Math.random().toString(36).slice(2,8))).trim();
+  if (!/^wss:\/\//.test(wsUrl)){ alert('أدخل LiveKit URL صحيح يبدأ بـ wss://'); return; }
 
   const LK = getLK();
-  if (!LK){ alert('LiveKit client غير محمّلة. تأكد من /vendor/... داخل <head>.'); return; }
+  if (!LK){ alert('LiveKit client غير محمّلة'); return; }
 
   try{
-    // توكِن من الـ backend
-    const resp = await fetch(`/api/token?room=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}&name=${encodeURIComponent(identity)}`, { cache:'no-store' });
+    // 1) احصل على التوكِن
+    const resp  = await fetch(`/api/token?room=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}&name=${encodeURIComponent(identity)}`, {cache:'no-store'});
     if (!resp.ok){ throw new Error('Token endpoint error'); }
     const token = await resp.text();
 
+    // 2) أنشئ الغرفة مع autoSubscribe
     const room = new LK.Room({
-      adaptiveStream:true, dynacast:true,
-      publishDefaults:{ simulcast:true, videoSimulcastLayers:[LK.VideoPresets.h180, LK.VideoPresets.h360, LK.VideoPresets.h720] }
+      adaptiveStream: true,
+      dynacast: true,
+      autoSubscribe: true,     // مهم جدًا
+      publishDefaults: { simulcast:true, videoSimulcastLayers:[LK.VideoPresets.h180, LK.VideoPresets.h360, LK.VideoPresets.h720] }
     });
 
+    // 3) أحداث
     room
-      .on(LK.RoomEvent.ParticipantDisconnected, p => { sfuDetachParticipant(p.sid); })
-      .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => { sfuAttachRemoteTrack(participant.sid, track); })
-      .on(LK.RoomEvent.TrackUnsubscribed, (track, pub, participant) => { sfuDetachTrack(participant.sid, track); });
+      .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => {
+        // شغّل مسار LiveKit صراحةً لبدء الإطارات
+        try {
+          const ghost = track.attach(); 
+          ghost.muted = true;            // حتى لا يُمنع التشغيل التلقائي
+          ghost.style.position='absolute'; ghost.style.left='-10000px'; ghost.style.width='0'; ghost.style.height='0';
+          document.body.appendChild(ghost);
+        } catch {}
 
+        sfuAttachRemoteTrack(participant.sid, track);
+      })
+      .on(LK.RoomEvent.TrackUnsubscribed, (track, pub, participant) => {
+        sfuDetachTrack(participant.sid, track);
+      })
+      .on(LK.RoomEvent.TrackPublished, (pub, participant) => {
+        // تأكّد من الاشتراك لو حدث النشر بعد دخولك
+        try { room.localParticipant.setSubscribed(pub, true); } catch {}
+      })
+      .on(LK.RoomEvent.ParticipantDisconnected, p => {
+        sfuDetachParticipant(p.sid);
+      });
+
+    // 4) اتصل
     await room.connect(wsUrl, token);
     sfu.room = room;
 
-    leaveSFUBtn.disabled = false; joinSFUBtn.disabled = true; lkUrlInput.disabled = true; roomInput.disabled = true; nameInput.disabled = true;
+    // 5) اشترك في أي مسارات منشورة مسبقًا (قبل دخولك)
+    for (const [,p] of room.remoteParticipants) {
+      const pubs = (p.tracks && Array.from(p.tracks.values())) || [];
+      for (const pub of pubs) {
+        try { room.localParticipant.setSubscribed(pub, true); } catch {}
+        // لو المسار جاهز بالفعل، اربطه فورًا
+        if (pub.track) sfuAttachRemoteTrack(p.sid, pub.track);
+      }
+    }
 
-    // نشر الستريم المحلي لو موجود
+    // UI
+    leaveSFUBtn.disabled = false; joinSFUBtn.disabled = true;
+    lkUrlInput.disabled = true; roomInput.disabled = true; nameInput.disabled = true;
+
+    // 6) انشر كاميرتك إن كانت مضافة (اضغط + إضافة كاميرا/مايك قبل/بعد الانضمام)
     const localKey = 'local' + localCount;
     if (sources[localKey] instanceof MediaStream){
       await sfuPublishLocal(sources[localKey]);
@@ -448,22 +479,39 @@ function sfuAttachRemoteTrack(partSid, livekitTrack){
   if (livekitTrack.kind === 'video') store.videoTrack = livekitTrack;
   else if (livekitTrack.kind === 'audio') store.audioTrack = livekitTrack;
 
+  // اجمع المسارات في MediaStream تُستخدم داخل المشغل
   const ms = store.stream || new MediaStream();
-  const addIf = (t)=>{ if (t && t.mediaStreamTrack && !ms.getTracks().includes(t.mediaStreamTrack)) ms.addTrack(t.mediaStreamTrack); };
-  addIf(store.videoTrack); addIf(store.audioTrack);
+  const addIf = (t)=>{ 
+    if (t && t.mediaStreamTrack && !ms.getTracks().includes(t.mediaStreamTrack)) {
+      ms.addTrack(t.mediaStreamTrack);
+    }
+  };
+  addIf(store.videoTrack); 
+  addIf(store.audioTrack);
   store.stream = ms;
 
   if (!store.key){
-    const key = `sfu_${partSid}`; store.key = key; sources[key] = ms;
-    buildThumbnails(); buildAudioSelect(); if (!camP) activateCamera(key);
-  } else { if (currentKey === store.key) activateCamera(store.key); }
+    const key = `sfu_${partSid}`;
+    store.key = key; 
+    sources[key] = ms;
+    buildThumbnails(); buildAudioSelect();
+    if (!camP) activateCamera(key);
+  } else {
+    if (currentKey === store.key) activateCamera(store.key); // تحديث العرض النشط
+  }
 
   sfu.remoteByParticipant.set(partSid, store);
 }
+
 function sfuDetachTrack(partSid, livekitTrack){
   const store = sfu.remoteByParticipant.get(partSid); if (!store) return;
-  try{ if (store.stream && livekitTrack?.mediaStreamTrack){ store.stream.removeTrack(livekitTrack.mediaStreamTrack); livekitTrack.mediaStreamTrack.stop?.(); } }catch{}
+  try{
+    if (store.stream && livekitTrack?.mediaStreamTrack){
+      store.stream.removeTrack(livekitTrack.mediaStreamTrack);
+    }
+  }catch{}
 }
+
 async function sfuLeave(){
   if (!sfu.room) return;
   try{
