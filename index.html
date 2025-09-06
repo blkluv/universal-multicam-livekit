@@ -12,33 +12,42 @@
 
 <!-- LiveKit (نسخة محليّة داخل الريبو) -->
 <script src="/vendor/livekit-client.umd.min.js"></script>
-  
   <script>
-  // جسر لتوحيد اسم المتغيّر العام القادم من UMD
   (function () {
-    var g = window;
-    var lk =
-      g.LiveKit ||
-      g.livekit ||
-      g.Livekit ||
-      g.LivekitClient ||   // بعض النسخ تستخدم هذا الاسم
-      g.livekitClient ||
-      g.LiveKitClient;
+    const g = window;
 
-    // عيّن أسماء موحّدة ليستعملها باقي الكود
-    if (!g.LiveKit && lk) g.LiveKit = lk;
-    if (!g.livekit && lk) g.livekit = lk;
+    // دالّة تلتقط أي اسم محتمل لنسخة UMD
+    function pick() {
+      return (
+        g.LiveKit ||
+        g.livekit ||
+        g.Livekit ||
+        g.LivekitClient ||   // الاسم الذي يفوتنا غالبًا
+        g.livekitClient ||
+        g.LiveKitClient ||
+        null
+      );
+    }
+
+    // ثبّت الاسم الموحّد ليستعمله الكود
+    function set(lk){ if (lk){ if (!g.LiveKit) g.LiveKit = lk; if (!g.livekit) g.livekit = lk; } }
+
+    let lk = pick();
+    if (!lk) {
+      // Fallback: CDNJS إن فشل المحلي
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/livekit-client/2.15.6/livekit-client.umd.min.js';
+      s.onload = function(){ lk = pick(); set(lk); if (!pick()) alert('تعذّر العثور على LiveKit بعد التحميل'); };
+      s.onerror = function(){ alert('تعذّر تحميل LiveKit client (محليًا وCDN)'); };
+      document.head.appendChild(s);
+    } else {
+      set(lk);
+    }
+
+    // واجهة موحّدة يستعملها باقي الكود
+    g.getLK = function(){ return pick(); };
   })();
-
-  // دالة الحصول على الكائن (تغطي كل الأسماء المحتملة)
-  <script>
-  // موجودة في <head> – اتركها إن كانت عندك
-  function getLK(){ 
-    const g = window; 
-    return g.LiveKit || g.livekit || g.Livekit || g.LivekitClient || g.livekitClient || g.LiveKitClient || null; 
-  }
 </script>
-
   
 <script>
   // التحقق السريع + Fallback (اختياري) لو النسخة المحليّة غير متاحة
